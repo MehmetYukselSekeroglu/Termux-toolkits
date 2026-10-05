@@ -231,13 +231,13 @@ jobs:
             artifact/OPENAI_UPSTREAM_COMMIT
 
           cat > artifact/BUILD_INFO.txt <<EOF
-Codex upstream: OpenAI rust-v0.160.0
-Android compatibility source: DioNanos/codex-termux v0.160.0-termux.2
-Target: aarch64-linux-android
-Android API: 29
-Rust: 1.95.0
-Android NDK: ${ANDROID_NDK_VERSION}
-EOF
+          Codex upstream: OpenAI rust-v0.160.0
+          Android compatibility source: DioNanos/codex-termux v0.160.0-termux.2
+          Target: aarch64-linux-android
+          Android API: 29
+          Rust: 1.95.0
+          Android NDK: ${ANDROID_NDK_VERSION}
+          EOF
 
           (
             cd artifact
