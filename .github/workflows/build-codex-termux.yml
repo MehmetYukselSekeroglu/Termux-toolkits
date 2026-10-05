@@ -1,0 +1,271 @@
+name: Build Codex Termux Android ARM64
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-codex-termux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-arm64:
+    name: Codex Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      ANDROID_NDK_VERSION: "28.2.13676358"
+
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "4"
+      CARGO_PROFILE_RELEASE_PANIC: "abort"
+      CARGO_PROFILE_RELEASE_STRIP: "symbols"
+
+    steps:
+      - name: Checkout Termux Codex source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: DioNanos/codex-termux
+          ref: v0.160.0-termux.2
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify upstream OpenAI base
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git remote add openai-upstream https://github.com/openai/codex.git || true
+
+          git fetch --no-tags openai-upstream \
+            refs/tags/rust-v0.160.0:refs/tags/rust-v0.160.0
+
+          echo "=== TERMUX SOURCE ==="
+          git rev-parse HEAD
+
+          echo "=== OPENAI UPSTREAM ==="
+          git rev-parse rust-v0.160.0
+
+          git merge-base --is-ancestor rust-v0.160.0 HEAD
+
+          echo "Upstream ancestry check OK"
+
+          git rev-parse HEAD > /tmp/termux-source-commit.txt
+          git rev-parse rust-v0.160.0 > /tmp/openai-upstream-commit.txt
+
+      - name: Verify Termux patch contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEX_PUBLIC_SANITIZED_TREE=1 bash verify-patches.sh
+
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            --no-install-recommends \
+            pkg-config \
+            libssl-dev \
+            protobuf-compiler \
+            python3
+
+          protoc --version
+
+      - name: Install Rust 1.95
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rustup toolchain install 1.95.0 \
+            --profile minimal \
+            --target aarch64-linux-android
+
+          rustup run 1.95.0 rustc --version
+          rustup run 1.95.0 cargo --version
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${ANDROID_HOME:?ANDROID_HOME is missing}"
+
+          export PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/cmdline-tools/bin:${PATH}"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+
+          NDK="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+
+          test -d "${NDK}"
+
+          echo "ANDROID_NDK_HOME=${NDK}" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_ROOT=${NDK}" >> "${GITHUB_ENV}"
+
+      - name: Prepare Android cross compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
+
+          export PATH="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+
+          export LIBLZMA_NO_PKG_CONFIG=1
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export OPENSSL_NO_PKG_CONFIG=1
+
+          export CC_aarch64_linux_android="aarch64-linux-android29-clang"
+          export CXX_aarch64_linux_android="aarch64-linux-android29-clang++"
+          export AR_aarch64_linux_android="llvm-ar"
+          export RANLIB_aarch64_linux_android="llvm-ranlib"
+
+          eval "$(
+            python3 scripts/fetch_rusty_v8_android.py |
+            grep '^export ' |
+            sed 's/^export //'
+          )"
+
+          test -n "${RUSTY_V8_ARCHIVE:-}"
+          test -n "${RUSTY_V8_SRC_BINDING_PATH:-}"
+
+          python3 scripts/check_v8_sandbox.py "${RUSTY_V8_ARCHIVE}"
+
+          BUILTINS="$(
+            find \
+              "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64" \
+              -name 'libclang_rt.builtins-aarch64-android.a' \
+              -print -quit
+          )"
+
+          test -n "${BUILTINS}"
+
+          {
+            echo "RUSTY_V8_ARCHIVE=${RUSTY_V8_ARCHIVE}"
+            echo "RUSTY_V8_SRC_BINDING_PATH=${RUSTY_V8_SRC_BINDING_PATH}"
+            echo "ANDROID_BUILTINS=${BUILTINS}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build Codex
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
+
+          export PATH="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+
+          export LIBLZMA_NO_PKG_CONFIG=1
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export OPENSSL_NO_PKG_CONFIG=1
+
+          export CC_aarch64_linux_android="aarch64-linux-android29-clang"
+          export CXX_aarch64_linux_android="aarch64-linux-android29-clang++"
+          export AR_aarch64_linux_android="llvm-ar"
+          export RANLIB_aarch64_linux_android="llvm-ranlib"
+
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="\
+          -Clink-arg=-lc++_shared \
+          -Clink-arg=-Wl,-rpath,\$ORIGIN \
+          -Clink-arg=${ANDROID_BUILTINS}"
+
+          cd codex-rs
+
+          rustup run 1.95.0 cargo build \
+            --locked \
+            --target aarch64-linux-android \
+            --release \
+            -p codex-cli \
+            -p codex-code-mode-host
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifact
+
+          cp \
+            codex-rs/target/aarch64-linux-android/release/codex \
+            artifact/codex
+
+          cp \
+            codex-rs/target/aarch64-linux-android/release/codex-code-mode-host \
+            artifact/codex-code-mode-host
+
+          cp \
+            "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            artifact/libc++_shared.so
+
+          export PATH="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+
+          llvm-strip --strip-all \
+            artifact/codex \
+            artifact/codex-code-mode-host \
+            artifact/libc++_shared.so
+
+          chmod 0755 \
+            artifact/codex \
+            artifact/codex-code-mode-host
+
+          chmod 0644 \
+            artifact/libc++_shared.so
+
+          cp \
+            /tmp/termux-source-commit.txt \
+            artifact/TERMUX_SOURCE_COMMIT
+
+          cp \
+            /tmp/openai-upstream-commit.txt \
+            artifact/OPENAI_UPSTREAM_COMMIT
+
+          cat > artifact/BUILD_INFO.txt <<EOF
+Codex upstream: OpenAI rust-v0.160.0
+Android compatibility source: DioNanos/codex-termux v0.160.0-termux.2
+Target: aarch64-linux-android
+Android API: 29
+Rust: 1.95.0
+Android NDK: ${ANDROID_NDK_VERSION}
+EOF
+
+          (
+            cd artifact
+            sha256sum \
+              codex \
+              codex-code-mode-host \
+              libc++_shared.so \
+              > SHA256SUMS
+          )
+
+          echo
+          echo "===== FILE INFO ====="
+          file artifact/codex
+          file artifact/codex-code-mode-host
+          file artifact/libc++_shared.so
+
+          echo
+          echo "===== SHA256 ====="
+          cat artifact/SHA256SUMS
+
+          echo
+          echo "===== SIZES ====="
+          ls -lh artifact
+
+      - name: Upload Android ARM64 binaries
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: codex-0.160.0-termux-android-arm64
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7
